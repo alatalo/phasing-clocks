@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Three-Clock Phasing Simulator</title>
+    <style>
+      :root {
+        --bg: #0e1013;
+        --panel: #161a20;
+        --ink: #e6e8ec;
+        --ink2: #a9b0bd;
+        --accent: #50d0ff;
+        --accent2: #ffc24b;
+        --accent3: #7dff78;
+        --warn: #ff6b6b;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu,
+          Cantarell, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+      }
+      header {
+        padding: 14px 16px;
+        background: linear-gradient(180deg, #141820, #10141a);
+        border-bottom: 1px solid #222a35;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      header h1 {
+        font-size: 16px;
+        margin: 0;
+        font-weight: 600;
+      }
+      header .spacer {
+        flex: 1;
+      }
+      button,
+      input[type="range"] {
+        accent-color: var(--accent);
+      }
+      .btn {
+        background: #1f2732;
+        color: var(--ink);
+        border: 1px solid #2c3646;
+        padding: 8px 10px;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .btn.alt {
+        background: #222b25;
+        border-color: #2c3a31;
+      }
+      .btn.warn {
+        background: #2c2020;
+        border-color: #3b2727;
+        color: #ffd9d9;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 320px;
+        gap: 16px;
+        padding: 16px;
+        height: calc(100% - 58px);
+      }
+      .stage {
+        background: #0c0f13;
+        border: 1px solid #1d2530;
+        border-radius: 12px;
+        position: relative;
+        overflow: auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .clocks {
+        display: flex;
+        gap: 18px;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: center;
+        padding: 18px;
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid #1f2732;
+        border-radius: 12px;
+        padding: 12px;
+        overflow: auto;
+      }
+      .lane {
+        background: #12161c;
+        border: 1px solid #232c39;
+        border-radius: 10px;
+        padding: 10px;
+        margin-bottom: 12px;
+      }
+      .lane h3 {
+        margin: 0 0 6px 0;
+        font-size: 14px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .lane h3 .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px;
+        align-items: center;
+        margin: 8px 0;
+      }
+      .row label {
+        color: var(--ink2);
+      }
+      .group {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .canvas-wrap {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+      }
+      .meta {
+        color: var(--ink2);
+        font-size: 12px;
+      }
+      .foot {
+        color: #8a93a3;
+        font-size: 12px;
+        padding: 6px 12px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Three-Clock Phasing Simulator</h1>
+      <button id="audioBtn" class="btn">Enable Audio</button>
+      <div class="spacer"></div>
+      <span class="foot"
+        >Tip: edit tempos live for different phase patterns.</span
+      >
+    </header>
+
+    <div class="grid">
+      <div class="stage">
+        <div class="clocks" id="clocks"></div>
+      </div>
+      <aside class="panel" id="panel"></aside>
+    </div>
+
+    <script>
+      (() => {
+        // --- CONFIG / MODEL -------------------------------------------------
+        // Two squares (A,B) and one circle (C) that is 1.3x larger
+        const LANES = [
+          {
+            id: "A",
+            shape: "square",
+            scale: 1.0,
+            color: "#50d0ff",
+            audioHz: 1800,
+          },
+          {
+            id: "B",
+            shape: "square",
+            scale: 1.0,
+            color: "#ffc24b",
+            audioHz: 1800,
+          },
+          {
+            id: "C",
+            shape: "circle",
+            scale: 1.3,
+            color: "#7dff78",
+            audioHz: 1800,
+          },
+        ];
+
+        // Defaults (you can tweak)
+        const defaults = {
+          hz: { A: 2.0, B: 1.98, C: 2.02 }, // tempos
+          onMs: { A: 90, B: 90, C: 90 }, // coil on-time
+          running: { A: true, B: true, C: true },
+          burstHz: 10,
+          burstOnMs: 35,
+          burstPulses: 10,
+        };
+
+        // --- STATE for each lane -------------------------------------------
+        const state = {};
+        LANES.forEach((l) => {
+          state[l.id] = {
+            minute: 0, // 0..59 position
+            polarity: false, // flips each pulse
+            hz: defaults.hz[l.id],
+            onMs: defaults.onMs[l.id],
+            running: defaults.running[l.id],
+            nextDue: performance.now() + 1000 / defaults.hz[l.id],
+            activeUntil: 0, // for drawing coil "on" highlight
+            burstRemain: 0,
+            burstPeriod: 100,
+            burstNext: 0,
+          };
+        });
+
+        // --- AUDIO ----------------------------------------------------------
+        let ac = null;
+        function enableAudio() {
+          if (ac) return;
+          ac = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        function clickSound(laneId) {
+          if (!ac) return;
+          const lane = LANES.find((x) => x.id === laneId);
+          const osc = ac.createOscillator();
+          osc.type = "square";
+          osc.frequency.value = lane.audioHz;
+
+          const gain = ac.createGain();
+          const t = ac.currentTime;
+          gain.gain.setValueAtTime(0.0001, t);
+          gain.gain.exponentialRampToValueAtTime(0.4, t + 0.002);
+          gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.02);
+
+          osc.connect(gain).connect(ac.destination);
+          osc.start(t);
+          osc.stop(t + 0.03);
+        }
+
+        // --- DOM: canvases + controls --------------------------------------
+        const clocksDiv = document.getElementById("clocks");
+        const panel = document.getElementById("panel");
+
+        const canvases = {};
+        LANES.forEach((l) => {
+          const wrap = document.createElement("div");
+          wrap.className = "canvas-wrap";
+
+          const canvas = document.createElement("canvas");
+          // Base square = 220px, circle is scaled
+          const base = 220;
+          const size = Math.round(
+            base * (l.shape === "circle" ? l.scale : 1.0)
+          );
+          canvas.width = size;
+          canvas.height = size;
+          canvas.style.background = "#0d1117";
+          canvas.style.border = "1px solid #222a35";
+          canvas.style.borderRadius = l.shape === "circle" ? "50%" : "10px";
+          wrap.appendChild(canvas);
+
+          const meta = document.createElement("div");
+          meta.className = "meta";
+          meta.innerHTML = `<b>${l.id}</b> – ${l.shape}${
+            l.shape === "circle" ? " (×1.3)" : ""
+          }`;
+          wrap.appendChild(meta);
+
+          clocksDiv.appendChild(wrap);
+          canvases[l.id] = canvas;
+        });
+
+        // Controls per lane
+        function addLaneControls(l) {
+          const s = state[l.id];
+          const box = document.createElement("div");
+          box.className = "lane";
+
+          const dot = `<span class="dot" style="background:${l.color}; box-shadow:0 0 10px ${l.color}80"></span>`;
+          box.innerHTML = `
+      <h3>${dot} Clock ${l.id} <span style="color:#8fa3bf; font-weight:400">(${
+            l.shape
+          }${l.shape === "circle" ? " ×1.3" : ""})</span></h3>
+      <div class="row">
+        <label>Tempo (Hz): <b><span id="hzVal-${l.id}">${s.hz.toFixed(
+            2
+          )}</span></b></label>
+        <input type="range" min="0" max="5" step="0.01" value="${
+          s.hz
+        }" id="hz-${l.id}">
+      </div>
+      <div class="row">
+        <label>On-time (ms): <b><span id="onVal-${l.id}">${
+            s.onMs
+          }</span></b></label>
+        <input type="range" min="20" max="200" step="1" value="${
+          s.onMs
+        }" id="on-${l.id}">
+      </div>
+      <div class="group">
+        <button class="btn" id="step-${l.id}">Step</button>
+        <button class="btn" id="nudge-${l.id}">Nudge</button>
+        <button class="btn alt" id="pause-${l.id}">${
+            s.running ? "Pause" : "Resume"
+          }</button>
+        <button class="btn warn" id="reset-${l.id}">Reset 12:00</button>
+      </div>
+    `;
+          panel.appendChild(box);
+
+          // wire up
+          box.querySelector(`#hz-${l.id}`).addEventListener("input", (e) => {
+            const v = parseFloat(e.target.value);
+            s.hz = v;
+            s.nextDue = performance.now() + (v > 0 ? 1000 / v : 1e9);
+            box.querySelector(`#hzVal-${l.id}`).textContent = v.toFixed(2);
+          });
+          box.querySelector(`#on-${l.id}`).addEventListener("input", (e) => {
+            const v = parseInt(e.target.value, 10);
+            s.onMs = v;
+            box.querySelector(`#onVal-${l.id}`).textContent = v;
+          });
+          box.querySelector(`#step-${l.id}`).addEventListener("click", () => {
+            pulse(l.id, s.onMs, true);
+          });
+          box.querySelector(`#nudge-${l.id}`).addEventListener("click", () => {
+            s.burstRemain = defaults.burstPulses;
+            s.burstPeriod = 100; // 10 Hz
+            s.burstNext = performance.now();
+          });
+          box
+            .querySelector(`#pause-${l.id}`)
+            .addEventListener("click", (ev) => {
+              s.running = !s.running;
+              ev.target.textContent = s.running ? "Pause" : "Resume";
+              s.nextDue = performance.now() + (s.hz > 0 ? 1000 / s.hz : 1e9);
+            });
+          box.querySelector(`#reset-${l.id}`).addEventListener("click", () => {
+            s.minute = 0;
+            s.polarity = false;
+          });
+        }
+        LANES.forEach(addLaneControls);
+
+        // Global buttons
+        document.getElementById("audioBtn").addEventListener("click", () => {
+          enableAudio();
+        });
+
+        // --- PULSING / SCHEDULING ------------------------------------------
+        function pulse(id, onMs, manual = false) {
+          const s = state[id];
+          s.polarity = !s.polarity; // alternate direction
+          s.minute = (s.minute + 1) % 60; // advance one minute
+          s.activeUntil = performance.now() + onMs;
+          clickSound(id);
+          // If manual, push nextDue so we don't "double fire"
+          if (manual)
+            s.nextDue = performance.now() + (s.hz > 0 ? 1000 / s.hz : 1e9);
+        }
+
+        function stepSchedulers(now) {
+          LANES.forEach((l) => {
+            const s = state[l.id];
+
+            // Handle burst (nudge)
+            if (s.burstRemain > 0 && now >= s.burstNext) {
+              pulse(l.id, defaults.burstOnMs, true);
+              s.burstRemain--;
+              s.burstNext = now + s.burstPeriod;
+            }
+
+            // Regular schedule
+            if (!s.running || s.hz <= 0) return;
+            const period = 1000 / s.hz;
+            while (now >= s.nextDue) {
+              pulse(l.id, s.onMs);
+              s.nextDue += period;
+              // Avoid runaway if period is 0
+              if (!isFinite(s.nextDue)) s.nextDue = now + 1e9;
+            }
+          });
+        }
+
+        // --- RENDERING ------------------------------------------------------
+        function draw() {
+          const now = performance.now();
+          stepSchedulers(now);
+
+          LANES.forEach((l) => {
+            const s = state[l.id];
+            const ctx = canvases[l.id].getContext("2d");
+            const W = canvases[l.id].width,
+              H = canvases[l.id].height;
+            ctx.clearRect(0, 0, W, H);
+
+            // Face
+            ctx.save();
+            ctx.translate(W / 2, H / 2);
+            const R = Math.min(W, H) * 0.44;
+
+            // Background / bezel
+            ctx.beginPath();
+            if (l.shape === "circle") {
+              ctx.arc(0, 0, R * 1.15, 0, Math.PI * 2);
+            } else {
+              const r = R * 1.15;
+              const rr = 12;
+              roundRect(ctx, -r, -r, r * 2, r * 2, rr);
+            }
+            ctx.fillStyle = "#0f141b";
+            ctx.fill();
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = "#222a35";
+            ctx.stroke();
+
+            // Dial circle
+            ctx.beginPath();
+            ctx.arc(0, 0, R, 0, Math.PI * 2);
+            ctx.strokeStyle = "#2b3544";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Hour tick marks (12)
+            for (let i = 0; i < 60; i++) {
+              const a = -Math.PI / 2 + i * ((Math.PI * 2) / 60);
+              const inner = i % 5 === 0 ? R * 0.8 : R * 0.88;
+              const outer = R * 0.97;
+              ctx.beginPath();
+              ctx.moveTo(inner * Math.cos(a), inner * Math.sin(a));
+              ctx.lineTo(outer * Math.cos(a), outer * Math.sin(a));
+              ctx.strokeStyle = i % 5 === 0 ? "#70819d" : "#3b4658";
+              ctx.lineWidth = i % 5 === 0 ? 3 : 1;
+              ctx.stroke();
+            }
+
+            // Minute hand
+            const ang = -Math.PI / 2 + (s.minute / 60) * Math.PI * 2;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(Math.cos(ang) * R * 0.88, Math.sin(ang) * R * 0.88);
+            ctx.strokeStyle = "#e7edf7";
+            ctx.lineWidth = 4;
+            ctx.lineCap = "round";
+            ctx.stroke();
+
+            // Hub
+            ctx.beginPath();
+            ctx.arc(0, 0, 5, 0, Math.PI * 2);
+            ctx.fillStyle = "#d7dee9";
+            ctx.fill();
+            ctx.restore();
+
+            // Coil "ON" glow
+            if (now < s.activeUntil) {
+              ctx.save();
+              ctx.globalAlpha = 0.35;
+              ctx.fillStyle = l.color;
+              if (l.shape === "circle") {
+                ctx.beginPath();
+                ctx.arc(W / 2, H / 2, Math.min(W, H) * 0.49, 0, Math.PI * 2);
+                ctx.fill();
+              } else {
+                ctx.fillRect(2, 2, W - 4, H - 4);
+              }
+              ctx.restore();
+            }
+
+            // Caption
+            const meta = canvases[l.id].nextSibling;
+            meta.innerHTML =
+              `<b>${l.id}</b> – ${l.shape}${
+                l.shape === "circle" ? " (×1.3)" : ""
+              } &nbsp;|&nbsp; ` +
+              `min: <b>${s.minute
+                .toString()
+                .padStart(2, "0")}</b> &nbsp;|&nbsp; ` +
+              `hz: ${s.hz.toFixed(2)} &nbsp;|&nbsp; on: ${s.onMs} ms ${
+                s.running
+                  ? ""
+                  : '&nbsp;|&nbsp; <span style="color:#ff9e9e">paused</span>'
+              }`;
+          });
+
+          requestAnimationFrame(draw);
+        }
+
+        function roundRect(ctx, x, y, w, h, r) {
+          const rr = Math.min(r, w / 2, h / 2);
+          ctx.beginPath();
+          ctx.moveTo(x + rr, y);
+          ctx.arcTo(x + w, y, x + w, y + h, rr);
+          ctx.arcTo(x + w, y + h, x, y + h, rr);
+          ctx.arcTo(x, y + h, x, y, rr);
+          ctx.arcTo(x, y, x + w, y, rr);
+          ctx.closePath();
+        }
+
+        requestAnimationFrame(draw);
+      })();
+    </script>
+  </body>
+</html>
