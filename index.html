@@ -3,16 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Three-Clock Phasing Simulator</title>
+    <title>Multi-Clock Phasing Simulator</title>
     <style>
       :root {
         --bg: #0e1013;
         --panel: #161a20;
         --ink: #e6e8ec;
         --ink2: #a9b0bd;
+        --line: #222a35;
         --accent: #50d0ff;
-        --accent2: #ffc24b;
-        --accent3: #7dff78;
         --warn: #ff6b6b;
       }
       html,
@@ -25,11 +24,11 @@
           Cantarell, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
       }
       header {
-        padding: 14px 16px;
+        padding: 12px 14px;
         background: linear-gradient(180deg, #141820, #10141a);
-        border-bottom: 1px solid #222a35;
+        border-bottom: 1px solid var(--line);
         display: flex;
-        gap: 12px;
+        gap: 8px;
         align-items: center;
         flex-wrap: wrap;
       }
@@ -38,12 +37,8 @@
         margin: 0;
         font-weight: 600;
       }
-      header .spacer {
+      .spacer {
         flex: 1;
-      }
-      button,
-      input[type="range"] {
-        accent-color: var(--accent);
       }
       .btn {
         background: #1f2732;
@@ -52,10 +47,6 @@
         padding: 8px 10px;
         border-radius: 8px;
         cursor: pointer;
-      }
-      .btn:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
       }
       .btn.alt {
         background: #222b25;
@@ -68,10 +59,10 @@
       }
       .grid {
         display: grid;
-        grid-template-columns: 1fr 320px;
+        grid-template-columns: 1fr 340px;
         gap: 16px;
         padding: 16px;
-        height: calc(100% - 58px);
+        height: calc(100% - 56px);
       }
       .stage {
         background: #0c0f13;
@@ -106,13 +97,13 @@
         margin-bottom: 12px;
       }
       .lane h3 {
-        margin: 0 0 6px 0;
+        margin: 0 0 6px;
         font-size: 14px;
         display: flex;
         align-items: center;
         gap: 8px;
       }
-      .lane h3 .dot {
+      .lane .dot {
         width: 10px;
         height: 10px;
         border-radius: 50%;
@@ -147,352 +138,332 @@
         font-size: 12px;
         padding: 6px 12px 0;
       }
+      input[type="range"],
+      select {
+        accent-color: var(--accent);
+      }
+      /* Mobile / narrow screens */
+      @media (max-width: 900px) {
+        .grid {
+          grid-template-columns: 1fr;
+          grid-auto-rows: auto;
+        }
+        .panel {
+          display: none;
+          max-height: 50vh;
+        }
+        .panel.open {
+          display: block;
+        }
+        .stage {
+          order: 1;
+        }
+        .panel {
+          order: 2;
+        }
+      }
     </style>
   </head>
   <body>
     <header>
       <h1>Three-Clock Phasing Simulator</h1>
       <button id="audioBtn" class="btn">Enable Audio</button>
+      <button id="toggleControls" class="btn alt" aria-expanded="false">
+        Controls
+      </button>
       <div class="spacer"></div>
-      <span class="foot"
-        >Tip: edit tempos live for different phase patterns.</span
-      >
+      <button id="startAll" class="btn">Start all</button>
+      <button id="stopAll" class="btn alt">Stop all</button>
+      <button id="addClock" class="btn">Add clock</button>
     </header>
 
     <div class="grid">
-      <div class="stage">
-        <div class="clocks" id="clocks"></div>
-      </div>
-      <aside class="panel" id="panel"></aside>
+      <div class="stage"><div id="clocks" class="clocks"></div></div>
+      <aside id="panel" class="panel"></aside>
     </div>
 
     <script>
       (() => {
-        // --- CONFIG / MODEL -------------------------------------------------
-        // Two squares (A,B) and one circle (C) that is 1.3x larger
-        const LANES = [
-          {
-            id: "A",
-            shape: "square",
-            scale: 1.0,
-            color: "#50d0ff",
+        // ------------------ Audio (iOS-safe) ------------------
+        let ac = null;
+        function ensureAudio() {
+          if (!ac) {
+            ac = new (window.AudioContext || window.webkitAudioContext)();
+          }
+          if (ac.state === "suspended") ac.resume();
+          // iOS unlock shim: play a very short silent blip
+          const t = ac.currentTime + 0.01;
+          const g = ac.createGain();
+          g.gain.value = 0.0001;
+          const o = ac.createOscillator();
+          o.type = "square";
+          o.frequency.value = 100;
+          o.connect(g).connect(ac.destination);
+          o.start(t);
+          o.stop(t + 0.01);
+        }
+        document
+          .getElementById("audioBtn")
+          .addEventListener("click", ensureAudio);
+
+        // ------------------ Model ------------------
+        const COLORS = [
+          "#50d0ff",
+          "#ffc24b",
+          "#7dff78",
+          "#ff6b6b",
+          "#c792ea",
+          "#78ffd5",
+          "#ffb86c",
+        ];
+        let colorIdx = 0;
+
+        function makeClock(id, shape = "square", tempo = 2.0) {
+          return {
+            id,
+            shape,
+            scale: shape === "circle" ? 1.3 : 1.0,
+            color: COLORS[colorIdx++ % COLORS.length],
             audioHz: 1800,
-          },
-          {
-            id: "B",
-            shape: "square",
-            scale: 1.0,
-            color: "#ffc24b",
-            audioHz: 1800,
-          },
-          {
-            id: "C",
-            shape: "circle",
-            scale: 1.3,
-            color: "#7dff78",
-            audioHz: 1800,
-          },
+            hz: tempo,
+            running: true,
+          };
+        }
+
+        // initial three: A,B squares; C circle
+        let clocks = [
+          makeClock("A", "square", 2.0),
+          makeClock("B", "square", 1.98),
+          makeClock("C", "circle", 2.02),
         ];
 
-        // Defaults (you can tweak)
-        const defaults = {
-          hz: { A: 2.0, B: 1.98, C: 2.02 }, // tempos
-          onMs: { A: 90, B: 90, C: 90 }, // coil on-time
-          running: { A: true, B: true, C: true },
-          burstHz: 10,
-          burstOnMs: 35,
-          burstPulses: 10,
-        };
-
-        // --- STATE for each lane -------------------------------------------
+        // state per clock
         const state = {};
-        LANES.forEach((l) => {
-          state[l.id] = {
-            minute: 0, // 0..59 position
-            polarity: false, // flips each pulse
-            hz: defaults.hz[l.id],
-            onMs: defaults.onMs[l.id],
-            running: defaults.running[l.id],
-            nextDue: performance.now() + 1000 / defaults.hz[l.id],
-            activeUntil: 0, // for drawing coil "on" highlight
-            burstRemain: 0,
-            burstPeriod: 100,
-            burstNext: 0,
+        function initState(c) {
+          const now = performance.now();
+          state[c.id] = {
+            minute: 0,
+            polarity: false,
+            period: c.hz > 0 ? 1000 / c.hz : Infinity,
+            nextDue: now + (c.hz > 0 ? 1000 / c.hz : 1e9),
+            activeUntil: 0,
           };
+        }
+        clocks.forEach(initState);
+
+        // ------------------ UI build ------------------
+        const clocksDiv = document.getElementById("clocks");
+        const panel = document.getElementById("panel");
+        const canvases = {};
+
+        function rebuildFaces() {
+          clocksDiv.innerHTML = "";
+          for (const c of clocks) {
+            const wrap = document.createElement("div");
+            wrap.className = "canvas-wrap";
+            const base = 220,
+              size = Math.round(base * (c.shape === "circle" ? c.scale : 1.0));
+            const canvas = document.createElement("canvas");
+            canvas.width = size;
+            canvas.height = size;
+            canvas.style.background = "#0d1117";
+            canvas.style.border = "1px solid #222a35";
+            canvas.style.borderRadius = c.shape === "circle" ? "50%" : "10px";
+            const meta = document.createElement("div");
+            meta.className = "meta";
+            meta.innerHTML = `<b>${c.id}</b> – ${c.shape}${
+              c.shape === "circle" ? " (×1.3)" : ""
+            }`;
+            wrap.appendChild(canvas);
+            wrap.appendChild(meta);
+            clocksDiv.appendChild(wrap);
+            canvases[c.id] = canvas;
+          }
+        }
+
+        function rebuildPanel() {
+          panel.innerHTML = "";
+          for (const c of clocks) {
+            const s = state[c.id];
+            const box = document.createElement("div");
+            box.className = "lane";
+            box.innerHTML = `
+      <h3><span class="dot" style="background:${c.color}; box-shadow:0 0 10px ${
+              c.color
+            }80"></span>
+          Clock ${c.id}</h3>
+      <div class="row">
+        <label>Shape</label>
+        <select data-act="shape" data-id="${c.id}">
+          <option value="square"${
+            c.shape === "square" ? " selected" : ""
+          }>square</option>
+          <option value="circle"${
+            c.shape === "circle" ? " selected" : ""
+          }>circle</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Tempo (Hz): <b><span data-bind="hzVal-${c.id}">${c.hz.toFixed(
+              2
+            )}</span></b></label>
+        <input type="range" min="0" max="5" step="0.01" value="${
+          c.hz
+        }" data-act="tempo" data-id="${c.id}">
+      </div>
+      <div class="group">
+        <button class="btn" data-act="toggle" data-id="${c.id}">${
+              c.running ? "Stop" : "Start"
+            }</button>
+        <button class="btn warn" data-act="remove" data-id="${
+          c.id
+        }">Remove</button>
+      </div>
+      <div class="meta" data-bind="meta-${c.id}"></div>
+    `;
+            panel.appendChild(box);
+          }
+        }
+
+        // event delegation for panel controls
+        panel.addEventListener("input", (e) => {
+          const act = e.target.getAttribute("data-act");
+          const id = e.target.getAttribute("data-id");
+          if (!act || !id) return;
+          const c = clocks.find((x) => x.id === id);
+          if (!c) return;
+          if (act === "tempo") {
+            const v = parseFloat(e.target.value);
+            c.hz = v;
+            state[id].period = v > 0 ? 1000 / v : Infinity;
+            // don't reset nextDue — keeps phase
+            const b = panel.querySelector(`[data-bind="hzVal-${id}"]`);
+            if (b) b.textContent = v.toFixed(2);
+          }
+          if (act === "shape") {
+            c.shape = e.target.value;
+            c.scale = c.shape === "circle" ? 1.3 : 1.0;
+            rebuildFaces(); // reflow canvases
+          }
+        });
+        panel.addEventListener("click", (e) => {
+          const act = e.target.getAttribute("data-act");
+          const id = e.target.getAttribute("data-id");
+          if (!act || !id) return;
+          const c = clocks.find((x) => x.id === id);
+          if (!c) return;
+          if (act === "toggle") {
+            c.running = !c.running;
+            if (c.running) {
+              state[id].period = c.hz > 0 ? 1000 / c.hz : Infinity;
+              state[id].nextDue =
+                performance.now() + (c.hz > 0 ? 1000 / c.hz : 1e9);
+            }
+            e.target.textContent = c.running ? "Stop" : "Start";
+          }
+          if (act === "remove") {
+            // keep at least 1 clock
+            if (clocks.length <= 1) return;
+            delete canvases[id];
+            delete state[id];
+            const idx = clocks.findIndex((x) => x.id === id);
+            if (idx >= 0) clocks.splice(idx, 1);
+            rebuildFaces();
+            rebuildPanel();
+          }
         });
 
-        // --- AUDIO ----------------------------------------------------------
-        let ac = null;
-        function enableAudio() {
-          if (ac) return;
-          ac = new (window.AudioContext || window.webkitAudioContext)();
-        }
-        function clickSound(laneId) {
-          if (!ac) return;
-          const lane = LANES.find((x) => x.id === laneId);
-          const osc = ac.createOscillator();
-          osc.type = "square";
-          osc.frequency.value = lane.audioHz;
+        // global buttons
+        document.getElementById("startAll").onclick = () => {
+          const now = performance.now();
+          clocks.forEach((c) => {
+            c.running = true;
+            state[c.id].period = c.hz > 0 ? 1000 / c.hz : Infinity;
+            state[c.id].nextDue = now + (c.hz > 0 ? 1000 / c.hz : 1e9);
+          });
+          rebuildPanel();
+        };
+        document.getElementById("stopAll").onclick = () => {
+          clocks.forEach((c) => (c.running = false));
+          rebuildPanel();
+        };
+        document.getElementById("addClock").onclick = () => {
+          // create new id (A..Z then A1, A2...)
+          let nid;
+          const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+          for (let i = 0; i < letters.length; i++) {
+            const cand = letters[i];
+            if (!clocks.find((x) => x.id === cand)) {
+              nid = cand;
+              break;
+            }
+          }
+          if (!nid) {
+            let n = 1;
+            while (!nid) {
+              const cand = "A" + n;
+              if (!clocks.find((x) => x.id === cand)) nid = cand;
+              n++;
+            }
+          }
+          const newClock = makeClock(nid, "square", 2.0);
+          clocks.push(newClock);
+          initState(newClock);
+          rebuildFaces();
+          rebuildPanel();
+        };
 
-          const gain = ac.createGain();
+        // controls drawer on mobile
+        const ctrlBtn = document.getElementById("toggleControls");
+        ctrlBtn.addEventListener("click", () => {
+          const open = panel.classList.toggle("open");
+          ctrlBtn.setAttribute("aria-expanded", open ? "true" : "false");
+        });
+
+        // build initial UI
+        rebuildFaces();
+        rebuildPanel();
+
+        // ------------------ Click sound ------------------
+        function clickSound(clock) {
+          if (!ac) return;
           const t = ac.currentTime;
+          const osc = ac.createOscillator();
+          const gain = ac.createGain();
+          osc.type = "square";
+          osc.frequency.value = clock.audioHz;
           gain.gain.setValueAtTime(0.0001, t);
           gain.gain.exponentialRampToValueAtTime(0.4, t + 0.002);
           gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.02);
-
           osc.connect(gain).connect(ac.destination);
           osc.start(t);
           osc.stop(t + 0.03);
         }
 
-        // --- DOM: canvases + controls --------------------------------------
-        const clocksDiv = document.getElementById("clocks");
-        const panel = document.getElementById("panel");
-
-        const canvases = {};
-        LANES.forEach((l) => {
-          const wrap = document.createElement("div");
-          wrap.className = "canvas-wrap";
-
-          const canvas = document.createElement("canvas");
-          // Base square = 220px, circle is scaled
-          const base = 220;
-          const size = Math.round(
-            base * (l.shape === "circle" ? l.scale : 1.0)
-          );
-          canvas.width = size;
-          canvas.height = size;
-          canvas.style.background = "#0d1117";
-          canvas.style.border = "1px solid #222a35";
-          canvas.style.borderRadius = l.shape === "circle" ? "50%" : "10px";
-          wrap.appendChild(canvas);
-
-          const meta = document.createElement("div");
-          meta.className = "meta";
-          meta.innerHTML = `<b>${l.id}</b> – ${l.shape}${
-            l.shape === "circle" ? " (×1.3)" : ""
-          }`;
-          wrap.appendChild(meta);
-
-          clocksDiv.appendChild(wrap);
-          canvases[l.id] = canvas;
-        });
-
-        // Controls per lane
-        function addLaneControls(l) {
-          const s = state[l.id];
-          const box = document.createElement("div");
-          box.className = "lane";
-
-          const dot = `<span class="dot" style="background:${l.color}; box-shadow:0 0 10px ${l.color}80"></span>`;
-          box.innerHTML = `
-      <h3>${dot} Clock ${l.id} <span style="color:#8fa3bf; font-weight:400">(${
-            l.shape
-          }${l.shape === "circle" ? " ×1.3" : ""})</span></h3>
-      <div class="row">
-        <label>Tempo (Hz): <b><span id="hzVal-${l.id}">${s.hz.toFixed(
-            2
-          )}</span></b></label>
-        <input type="range" min="0" max="5" step="0.01" value="${
-          s.hz
-        }" id="hz-${l.id}">
-      </div>
-      <div class="row">
-        <label>On-time (ms): <b><span id="onVal-${l.id}">${
-            s.onMs
-          }</span></b></label>
-        <input type="range" min="20" max="200" step="1" value="${
-          s.onMs
-        }" id="on-${l.id}">
-      </div>
-      <div class="group">
-        <button class="btn" id="step-${l.id}">Step</button>
-        <button class="btn" id="nudge-${l.id}">Nudge</button>
-        <button class="btn alt" id="pause-${l.id}">${
-            s.running ? "Pause" : "Resume"
-          }</button>
-        <button class="btn warn" id="reset-${l.id}">Reset 12:00</button>
-      </div>
-    `;
-          panel.appendChild(box);
-
-          // wire up
-          box.querySelector(`#hz-${l.id}`).addEventListener("input", (e) => {
-            const v = parseFloat(e.target.value);
-            s.hz = v;
-            s.nextDue = performance.now() + (v > 0 ? 1000 / v : 1e9);
-            box.querySelector(`#hzVal-${l.id}`).textContent = v.toFixed(2);
-          });
-          box.querySelector(`#on-${l.id}`).addEventListener("input", (e) => {
-            const v = parseInt(e.target.value, 10);
-            s.onMs = v;
-            box.querySelector(`#onVal-${l.id}`).textContent = v;
-          });
-          box.querySelector(`#step-${l.id}`).addEventListener("click", () => {
-            pulse(l.id, s.onMs, true);
-          });
-          box.querySelector(`#nudge-${l.id}`).addEventListener("click", () => {
-            s.burstRemain = defaults.burstPulses;
-            s.burstPeriod = 100; // 10 Hz
-            s.burstNext = performance.now();
-          });
-          box
-            .querySelector(`#pause-${l.id}`)
-            .addEventListener("click", (ev) => {
-              s.running = !s.running;
-              ev.target.textContent = s.running ? "Pause" : "Resume";
-              s.nextDue = performance.now() + (s.hz > 0 ? 1000 / s.hz : 1e9);
-            });
-          box.querySelector(`#reset-${l.id}`).addEventListener("click", () => {
-            s.minute = 0;
-            s.polarity = false;
-          });
+        // ------------------ Scheduler ------------------
+        function pulse(clockId, glowMs = 90) {
+          const st = state[clockId],
+            c = clocks.find((x) => x.id === clockId);
+          if (!st || !c) return;
+          st.polarity = !st.polarity;
+          st.minute = (st.minute + 1) % 60;
+          st.activeUntil = performance.now() + glowMs;
+          clickSound(c);
         }
-        LANES.forEach(addLaneControls);
-
-        // Global buttons
-        document.getElementById("audioBtn").addEventListener("click", () => {
-          enableAudio();
-        });
-
-        // --- PULSING / SCHEDULING ------------------------------------------
-        function pulse(id, onMs, manual = false) {
-          const s = state[id];
-          s.polarity = !s.polarity; // alternate direction
-          s.minute = (s.minute + 1) % 60; // advance one minute
-          s.activeUntil = performance.now() + onMs;
-          clickSound(id);
-          // If manual, push nextDue so we don't "double fire"
-          if (manual)
-            s.nextDue = performance.now() + (s.hz > 0 ? 1000 / s.hz : 1e9);
-        }
-
         function stepSchedulers(now) {
-          LANES.forEach((l) => {
-            const s = state[l.id];
-
-            // Handle burst (nudge)
-            if (s.burstRemain > 0 && now >= s.burstNext) {
-              pulse(l.id, defaults.burstOnMs, true);
-              s.burstRemain--;
-              s.burstNext = now + s.burstPeriod;
+          for (const c of clocks) {
+            const st = state[c.id];
+            if (!c.running || !isFinite(st.period)) continue;
+            while (now >= st.nextDue) {
+              pulse(c.id);
+              st.nextDue += st.period;
+              // if tab slept a long time, snap ahead
+              if (now - st.nextDue > 5000) st.nextDue = now + st.period;
             }
-
-            // Regular schedule
-            if (!s.running || s.hz <= 0) return;
-            const period = 1000 / s.hz;
-            while (now >= s.nextDue) {
-              pulse(l.id, s.onMs);
-              s.nextDue += period;
-              // Avoid runaway if period is 0
-              if (!isFinite(s.nextDue)) s.nextDue = now + 1e9;
-            }
-          });
+          }
         }
 
-        // --- RENDERING ------------------------------------------------------
-        function draw() {
-          const now = performance.now();
-          stepSchedulers(now);
-
-          LANES.forEach((l) => {
-            const s = state[l.id];
-            const ctx = canvases[l.id].getContext("2d");
-            const W = canvases[l.id].width,
-              H = canvases[l.id].height;
-            ctx.clearRect(0, 0, W, H);
-
-            // Face
-            ctx.save();
-            ctx.translate(W / 2, H / 2);
-            const R = Math.min(W, H) * 0.44;
-
-            // Background / bezel
-            ctx.beginPath();
-            if (l.shape === "circle") {
-              ctx.arc(0, 0, R * 1.15, 0, Math.PI * 2);
-            } else {
-              const r = R * 1.15;
-              const rr = 12;
-              roundRect(ctx, -r, -r, r * 2, r * 2, rr);
-            }
-            ctx.fillStyle = "#0f141b";
-            ctx.fill();
-            ctx.lineWidth = 2;
-            ctx.strokeStyle = "#222a35";
-            ctx.stroke();
-
-            // Dial circle
-            ctx.beginPath();
-            ctx.arc(0, 0, R, 0, Math.PI * 2);
-            ctx.strokeStyle = "#2b3544";
-            ctx.lineWidth = 2;
-            ctx.stroke();
-
-            // Hour tick marks (12)
-            for (let i = 0; i < 60; i++) {
-              const a = -Math.PI / 2 + i * ((Math.PI * 2) / 60);
-              const inner = i % 5 === 0 ? R * 0.8 : R * 0.88;
-              const outer = R * 0.97;
-              ctx.beginPath();
-              ctx.moveTo(inner * Math.cos(a), inner * Math.sin(a));
-              ctx.lineTo(outer * Math.cos(a), outer * Math.sin(a));
-              ctx.strokeStyle = i % 5 === 0 ? "#70819d" : "#3b4658";
-              ctx.lineWidth = i % 5 === 0 ? 3 : 1;
-              ctx.stroke();
-            }
-
-            // Minute hand
-            const ang = -Math.PI / 2 + (s.minute / 60) * Math.PI * 2;
-            ctx.beginPath();
-            ctx.moveTo(0, 0);
-            ctx.lineTo(Math.cos(ang) * R * 0.88, Math.sin(ang) * R * 0.88);
-            ctx.strokeStyle = "#e7edf7";
-            ctx.lineWidth = 4;
-            ctx.lineCap = "round";
-            ctx.stroke();
-
-            // Hub
-            ctx.beginPath();
-            ctx.arc(0, 0, 5, 0, Math.PI * 2);
-            ctx.fillStyle = "#d7dee9";
-            ctx.fill();
-            ctx.restore();
-
-            // Coil "ON" glow
-            if (now < s.activeUntil) {
-              ctx.save();
-              ctx.globalAlpha = 0.35;
-              ctx.fillStyle = l.color;
-              if (l.shape === "circle") {
-                ctx.beginPath();
-                ctx.arc(W / 2, H / 2, Math.min(W, H) * 0.49, 0, Math.PI * 2);
-                ctx.fill();
-              } else {
-                ctx.fillRect(2, 2, W - 4, H - 4);
-              }
-              ctx.restore();
-            }
-
-            // Caption
-            const meta = canvases[l.id].nextSibling;
-            meta.innerHTML =
-              `<b>${l.id}</b> – ${l.shape}${
-                l.shape === "circle" ? " (×1.3)" : ""
-              } &nbsp;|&nbsp; ` +
-              `min: <b>${s.minute
-                .toString()
-                .padStart(2, "0")}</b> &nbsp;|&nbsp; ` +
-              `hz: ${s.hz.toFixed(2)} &nbsp;|&nbsp; on: ${s.onMs} ms ${
-                s.running
-                  ? ""
-                  : '&nbsp;|&nbsp; <span style="color:#ff9e9e">paused</span>'
-              }`;
-          });
-
-          requestAnimationFrame(draw);
-        }
-
+        // ------------------ Draw ------------------
         function roundRect(ctx, x, y, w, h, r) {
           const rr = Math.min(r, w / 2, h / 2);
           ctx.beginPath();
@@ -503,7 +474,89 @@
           ctx.arcTo(x, y, x + w, y, rr);
           ctx.closePath();
         }
-
+        function draw() {
+          const now = performance.now();
+          stepSchedulers(now);
+          for (const c of clocks) {
+            const st = state[c.id],
+              ctx = canvases[c.id].getContext("2d");
+            const W = canvases[c.id].width,
+              H = canvases[c.id].height,
+              R = Math.min(W, H) * 0.44;
+            ctx.clearRect(0, 0, W, H);
+            ctx.save();
+            ctx.translate(W / 2, H / 2);
+            // bezel
+            ctx.beginPath();
+            if (c.shape === "circle") ctx.arc(0, 0, R * 1.15, 0, Math.PI * 2);
+            else roundRect(ctx, -R * 1.15, -R * 1.15, R * 2.3, R * 2.3, 12);
+            ctx.fillStyle = "#0f141b";
+            ctx.fill();
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = "#222a35";
+            ctx.stroke();
+            // dial ring
+            ctx.beginPath();
+            ctx.arc(0, 0, R, 0, Math.PI * 2);
+            ctx.strokeStyle = "#2b3544";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            // ticks
+            for (let i = 0; i < 60; i++) {
+              const a = -Math.PI / 2 + i * ((Math.PI * 2) / 60);
+              const inner = i % 5 === 0 ? R * 0.8 : R * 0.88,
+                outer = R * 0.97;
+              ctx.beginPath();
+              ctx.moveTo(inner * Math.cos(a), inner * Math.sin(a));
+              ctx.lineTo(outer * Math.cos(a), outer * Math.sin(a));
+              ctx.strokeStyle = i % 5 === 0 ? "#70819d" : "#3b4658";
+              ctx.lineWidth = i % 5 === 0 ? 3 : 1;
+              ctx.stroke();
+            }
+            // minute hand
+            const ang = -Math.PI / 2 + (st.minute / 60) * Math.PI * 2;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(Math.cos(ang) * R * 0.88, Math.sin(ang) * R * 0.88);
+            ctx.strokeStyle = "#e7edf7";
+            ctx.lineWidth = 4;
+            ctx.lineCap = "round";
+            ctx.stroke();
+            // hub
+            ctx.beginPath();
+            ctx.arc(0, 0, 5, 0, Math.PI * 2);
+            ctx.fillStyle = "#d7dee9";
+            ctx.fill();
+            ctx.restore();
+            // coil glow
+            if (now < st.activeUntil) {
+              ctx.save();
+              ctx.globalAlpha = 0.35;
+              ctx.fillStyle = c.color;
+              if (c.shape === "circle") {
+                ctx.beginPath();
+                ctx.arc(W / 2, H / 2, Math.min(W, H) * 0.49, 0, Math.PI * 2);
+                ctx.fill();
+              } else {
+                ctx.fillRect(2, 2, W - 4, H - 4);
+              }
+              ctx.restore();
+            }
+            // caption
+            const meta = canvases[c.id].nextSibling;
+            meta.innerHTML = `<b>${c.id}</b> – ${c.shape}${
+              c.shape === "circle" ? " (×1.3)" : ""
+            }
+      &nbsp;|&nbsp; min: <b>${String(st.minute).padStart(2, "0")}</b>
+      &nbsp;|&nbsp; hz: ${c.hz.toFixed(2)}
+      ${
+        c.running
+          ? ""
+          : '&nbsp;|&nbsp;<span style="color:#ff9e9e">stopped</span>'
+      }`;
+          }
+          requestAnimationFrame(draw);
+        }
         requestAnimationFrame(draw);
       })();
     </script>
